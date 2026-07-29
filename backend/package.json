@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "description": "",
   "main": "server.js",
-  "scripts": {
+ "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "build": "next build frontend/my-app"
-  },
+    "build": "cd frontend/my-app && npm install && npm run build"
+  }
   "keywords": [],
   "author": "",
   "license": "ISC",
