@@ -7,7 +7,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "build": "next build"
+    "build": "next build frontend/my-app"
   },
   "keywords": [],
   "author": "",
