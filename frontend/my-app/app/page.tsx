@@ -1735,6 +1735,19 @@ export default function PropertyManagementApp() {
         )}
       </main>
 
+      {/* Footer Section */}
+      <footer className="bg-slate-900 text-slate-400 py-6 mt-auto border-t border-slate-800">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <Building className="w-5 h-5 text-emerald-500" />
+            <span className="font-bold text-slate-200">Rental Management</span>
+          </div>
+          <p className="text-xs sm:text-sm">
+            &copy; {new Date().getFullYear()} Rental Management Project. All rights reserved.
+          </p>
+        </div>
+      </footer>
+
       {/* ========================================== */}
       {/* GLOBAL MODALS (PROPERTY DETAILS / ADD / PAYMENT) */}
       {/* ========================================== */}
@@ -1852,17 +1865,19 @@ export default function PropertyManagementApp() {
                   <h4 className="text-sm font-bold text-slate-900">Leave a Review</h4>
                   <div className="flex items-center gap-2">
                     <label className="text-xs font-semibold text-slate-600">Rating:</label>
-                    <select 
-                      value={reviewForm.rating} 
-                      onChange={e => setReviewForm({...reviewForm, rating: Number(e.target.value)})}
-                      className="px-2 py-1 bg-white border border-slate-200 rounded-lg text-xs"
-                    >
-                      <option value={5}>5 Stars</option>
-                      <option value={4}>4 Stars</option>
-                      <option value={3}>3 Stars</option>
-                      <option value={2}>2 Stars</option>
-                      <option value={1}>1 Star</option>
-                    </select>
+                    <div className="flex gap-1">
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <Star 
+                          key={star}
+                          onClick={() => setReviewForm({...reviewForm, rating: star})}
+                          className={`w-5 h-5 cursor-pointer transition-all hover:scale-110 ${
+                            star <= reviewForm.rating 
+                              ? 'text-amber-400 fill-amber-400' 
+                              : 'text-slate-300 hover:text-amber-200 hover:fill-amber-200'
+                          }`} 
+                        />
+                      ))}
+                    </div>
                   </div>
                   <textarea 
                     value={reviewForm.comment}
