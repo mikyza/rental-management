@@ -120,6 +120,27 @@ const MaintenanceTicketSchema = new mongoose.Schema({
   status: { type: String, enum: ['open', 'in_progress', 'resolved'], default: 'open' }
 }, { timestamps: true });
 
+// NEW: Request to Buy or Rent Schema
+const PropertyRequestSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  propertyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Property', required: true },
+  requestType: { type: String, enum: ['buy', 'rent'], required: true },
+  status: { type: String, enum: ['pending', 'approved', 'rejected', 'payment_pending', 'completed'], default: 'pending' },
+  offeredAmount: { type: Number, required: true },
+  agreementUrl: { type: String }, // For uploaded rent/buy agreements
+  adminNotes: { type: String }
+}, { timestamps: true });
+
+// NEW: Payment & Transaction Log Schema
+const PaymentLogSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  requestId: { type: mongoose.Schema.Types.ObjectId, ref: 'PropertyRequest' },
+  amount: { type: Number, required: true },
+  status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  paymentMethod: { type: String, default: 'Bank Transfer/Card' },
+  transactionId: { type: String }
+}, { timestamps: true });
+
 const AdminLogSchema = new mongoose.Schema({
   adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   action: { type: String, required: true },
@@ -140,6 +161,8 @@ const Property = mongoose.models.Property || mongoose.model('Property', Property
 const Unit = mongoose.models.Unit || mongoose.model('Unit', UnitSchema);
 const Lease = mongoose.models.Lease || mongoose.model('Lease', LeaseSchema);
 const MaintenanceTicket = mongoose.models.MaintenanceTicket || mongoose.model('MaintenanceTicket', MaintenanceTicketSchema);
+const PropertyRequest = mongoose.models.PropertyRequest || mongoose.model('PropertyRequest', PropertyRequestSchema);
+const PaymentLog = mongoose.models.PaymentLog || mongoose.model('PaymentLog', PaymentLogSchema);
 const AdminLog = mongoose.models.AdminLog || mongoose.model('AdminLog', AdminLogSchema);
 const SystemConfig = mongoose.models.SystemConfig || mongoose.model('SystemConfig', SystemConfigSchema);
 
@@ -323,7 +346,7 @@ nextApp.prepare().then(async () => {
   });
 
   // ==========================================
-  // 5. AUTHENTICATION
+  // 5. AUTHENTICATION & USER MANAGEMENT
   // ==========================================
   expressApp.post('/api/user/signup', async (req, res) => {
     try {
@@ -368,6 +391,37 @@ nextApp.prepare().then(async () => {
       console.error("Login Error:", err);
       res.status(500).json({ error: err.message }); 
     }
+  });
+
+  // Edit User Profile Info
+  expressApp.put('/api/user/profile', authenticateToken, async (req, res) => {
+    try {
+      const { fullName, phoneNumber, password } = req.body;
+      const updateData = {};
+      
+      if (fullName) updateData.fullName = fullName;
+      if (phoneNumber) updateData.phoneNumber = phoneNumber;
+      if (password) updateData.password = await bcrypt.hash(password, 12);
+
+      const updatedUser = await User.findByIdAndUpdate(req.user.id, updateData, { new: true }).select('-password');
+      res.json({ message: 'Profile updated successfully', user: updatedUser });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // Suspend User Account
+  expressApp.put('/api/user/suspend', authenticateToken, async (req, res) => {
+    try {
+      await User.findByIdAndUpdate(req.user.id, { isActive: false });
+      res.json({ message: 'Account successfully suspended. Contact admin to reactivate.' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // Delete User Account Completely
+  expressApp.delete('/api/user/account', authenticateToken, async (req, res) => {
+    try {
+      await User.findByIdAndDelete(req.user.id);
+      res.json({ message: 'Account permanently deleted.' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   // ==========================================
@@ -425,7 +479,91 @@ nextApp.prepare().then(async () => {
   });
 
   // ==========================================
-  // 7. LANDLORD & PROPERTY MANAGER APIs
+  // 7. BUY / RENT REQUESTS (USER TRACKING)
+  // ==========================================
+  // Create a new request to buy or rent
+  expressApp.post('/api/requests', authenticateToken, async (req, res) => {
+    try {
+      const { propertyId, requestType, offeredAmount } = req.body;
+      const newRequest = await PropertyRequest.create({
+        userId: req.user.id,
+        propertyId,
+        requestType, // 'buy' or 'rent'
+        offeredAmount,
+        status: 'pending'
+      });
+      
+      io.to('admin-dashboard-room').emit('newPropertyRequest', newRequest);
+      res.status(201).json({ message: 'Request submitted to admin for approval.', request: newRequest });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // Get User's Own Requests for Tracking
+  expressApp.get('/api/requests/my-requests', authenticateToken, async (req, res) => {
+    try {
+      const requests = await PropertyRequest.find({ userId: req.user.id })
+        .populate('propertyId')
+        .sort({ createdAt: -1 });
+      res.json(requests);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // Upload Agreement (PDF/DOC) to a Specific Request
+  expressApp.post('/api/requests/:id/agreement', authenticateToken, upload.single('agreement'), async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      
+      const fileUrl = `/uploads/${req.file.filename}`;
+      const request = await PropertyRequest.findByIdAndUpdate(
+        req.params.id, 
+        { agreementUrl: fileUrl },
+        { new: true }
+      );
+      
+      if (!request) return res.status(404).json({ error: 'Request not found' });
+      res.json({ message: 'Agreement uploaded successfully', request });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ==========================================
+  // 8. PAYMENT PLATFORM INTEGRATION
+  // ==========================================
+  // Initiate payment after a request is approved by admin
+  expressApp.post('/api/payments/initiate', authenticateToken, async (req, res) => {
+    try {
+      const { requestId, amount, paymentMethod } = req.body;
+      
+      const request = await PropertyRequest.findById(requestId);
+      if (!request || !['approved', 'payment_pending'].includes(request.status)) {
+        return res.status(400).json({ error: 'Request must be approved by admin before payment' });
+      }
+
+      // Create a pending payment log
+      const paymentLog = await PaymentLog.create({
+        userId: req.user.id,
+        requestId,
+        amount,
+        paymentMethod: paymentMethod || 'Card/Bank',
+        status: 'pending',
+        transactionId: 'TXN-' + Math.random().toString(36).substr(2, 9).toUpperCase()
+      });
+
+      // Update request status to reflect payment is in progress
+      request.status = 'payment_pending';
+      await request.save();
+
+      // Return a professional mock-checkout structure for the frontend to render the payment gateway
+      res.json({ 
+        message: 'Payment platform initialized.', 
+        transactionId: paymentLog.transactionId,
+        checkoutUrl: `/payment-gateway?txn=${paymentLog.transactionId}`, // Frontend will handle this view
+        paymentLog 
+      });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ==========================================
+  // 9. LANDLORD & PROPERTY MANAGER APIs
   // ==========================================
   expressApp.post('/api/landlord/properties', authenticateToken, requireLandlordOrAdmin, async (req, res) => {
     try {
@@ -442,7 +580,7 @@ nextApp.prepare().then(async () => {
   });
 
   // ==========================================
-  // 8. TENANT APIs
+  // 10. TENANT APIs
   // ==========================================
   expressApp.get('/api/tenant/my-leases', authenticateToken, async (req, res) => {
     try {
@@ -481,10 +619,48 @@ nextApp.prepare().then(async () => {
   });
 
   // ==========================================
-  // 9. SUPER ADMIN ENGINE (Full CRUD matching page.tsx)
+  // 11. SUPER ADMIN ENGINE (Full CRUD)
   // ==========================================
   
-  // -- Admin Properties --
+  // -- Admin Buy/Rent Requests Management --
+  expressApp.get('/api/admin/requests', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const requests = await PropertyRequest.find()
+        .populate('userId', 'fullName phoneNumber')
+        .populate('propertyId', 'title price')
+        .sort({ createdAt: -1 });
+      res.json(requests);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.put('/api/admin/requests/:id/status', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const { status, adminNotes } = req.body;
+      const request = await PropertyRequest.findByIdAndUpdate(
+        req.params.id, 
+        { status, adminNotes },
+        { new: true }
+      );
+      if (!request) return res.status(404).json({ error: 'Request not found' });
+      
+      // Emit to user room that their request status changed
+      io.to(`user-room-${request.userId}`).emit('requestStatusUpdate', request);
+      res.json({ message: 'Request status updated successfully', request });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // -- Admin View Payment Logs --
+  expressApp.get('/api/admin/payments', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const payments = await PaymentLog.find()
+        .populate('userId', 'fullName')
+        .populate('requestId')
+        .sort({ createdAt: -1 });
+      res.json(payments);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // -- Admin Properties (Can edit landlord info here) --
   expressApp.get('/api/admin/properties', authenticateToken, requireAdmin, async (req, res) => {
     try {
       const properties = await Property.find().populate('landlordId', 'fullName').sort({ createdAt: -1 });
@@ -649,7 +825,7 @@ nextApp.prepare().then(async () => {
   });
 
   // ==========================================
-  // 10. NEXT.JS ROUTING ROUTER
+  // 12. NEXT.JS ROUTING ROUTER
   // ==========================================
   expressApp.all(/.*/, (req, res) => {
     const parsedUrl = parse(req.url, true);
