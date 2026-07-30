@@ -1,4 +1,5 @@
 import dns from 'dns';
+dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4', '1.0.0.1']);
 dns.setDefaultResultOrder('ipv4first');
 
 import express from 'express';
@@ -28,7 +29,7 @@ const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || 'localhost';
 const port = parseInt(process.env.PORT || '3000', 10);
 const JWT_SECRET = process.env.JWT_SECRET || 'SUPER_SECRET_REAL_ESTATE_KEY_2026';
-const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
 
 console.log('🚀 Initializing Full-Stack Property Rental & Real Estate Backend...');
 console.log('DEBUG: Booting unified property management architecture...');
@@ -117,12 +118,46 @@ nextApp.prepare().then(async () => {
 
   // MONGODB CONNECTION
   if (!MONGODB_URI) {
-    console.error('❌ FATAL: MONGODB_URI is not defined in environment variables.');
+    console.error('❌ FATAL: MONGO_URI or MONGODB_URI is not defined in environment variables.');
     process.exit(1);
   }
 
-  await mongoose.connect(MONGODB_URI);
+  await mongoose.connect(MONGODB_URI, {
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10
+  });
   console.log(`🍃 MongoDB Connected Successfully to Cluster!`);
+
+  // ==========================================
+  // SEED DEFAULT ADMIN USER
+  // ==========================================
+  try {
+    const existingAdmin = await User.findOne({ phoneNumber: 'admin' });
+    if (!existingAdmin) {
+      const hashedAdminPassword = await bcrypt.hash('0746323229', 12);
+      await User.create({
+        phoneNumber: 'admin',
+        password: hashedAdminPassword,
+        fullName: 'System Administrator',
+        role: 'admin',
+        isActive: true
+      });
+      console.log('🛡️ Default Admin account successfully seeded (Username: admin, Password: 0746323229)');
+    } else {
+      // Ensure password matches requirements if it already exists
+      const isMatch = await bcrypt.compare('0746323229', existingAdmin.password);
+      if (!isMatch) {
+        existingAdmin.password = await bcrypt.hash('0746323229', 12);
+        existingAdmin.role = 'admin';
+        existingAdmin.isActive = true;
+        await existingAdmin.save();
+        console.log('🛡️ Default Admin account credentials updated/verified.');
+      }
+    }
+  } catch (seedErr) {
+    console.error('⚠️ Notice: Could not verify/seed default admin user:', seedErr.message);
+  }
 
   const expressApp = express();
   const server = createServer(expressApp);
@@ -306,7 +341,7 @@ nextApp.prepare().then(async () => {
   });
 
   // ==========================================
-  // 9. SUPER ADMIN ENGINE
+  // 9. SUPER ADMIN ENGINE (Full Add/Delete/Edit Support)
   // ==========================================
   expressApp.post('/api/admin/upload', authenticateToken, requireAdmin, upload.single('image'), (req, res) => {
     try {
@@ -316,6 +351,127 @@ nextApp.prepare().then(async () => {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
+  // --- ADMIN PROPERTY MANAGEMENT (CREATE, EDIT, DELETE) ---
+  expressApp.get('/api/admin/properties', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const properties = await Property.find().sort({ createdAt: -1 });
+      res.json(properties);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.post('/api/admin/properties', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const newProperty = await Property.create({
+        ...req.body,
+        landlordId: req.body.landlordId || req.user.id,
+        status: req.body.status || 'approved'
+      });
+      await AdminLog.create({
+        adminId: req.dbUser.id,
+        action: 'CREATE_PROPERTY',
+        targetType: 'property',
+        targetId: newProperty.id,
+        ipAddress: req.ip
+      });
+      res.status(201).json(newProperty);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.put('/api/admin/properties/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const updated = await Property.findByIdAndUpdate(req.params.id, req.body, { new: true });
+      if (!updated) return res.status(404).json({ error: 'Property not found' });
+      await AdminLog.create({
+        adminId: req.dbUser.id,
+        action: 'UPDATE_PROPERTY',
+        targetType: 'property',
+        targetId: updated.id,
+        ipAddress: req.ip
+      });
+      res.json(updated);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.delete('/api/admin/properties/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const deleted = await Property.findByIdAndDelete(req.params.id);
+      if (!deleted) return res.status(404).json({ error: 'Property not found' });
+      // Clean up child units & leases if needed
+      await Unit.deleteMany({ propertyId: req.params.id });
+      await AdminLog.create({
+        adminId: req.dbUser.id,
+        action: 'DELETE_PROPERTY',
+        targetType: 'property',
+        targetId: req.params.id,
+        ipAddress: req.ip
+      });
+      res.json({ message: 'Property deleted successfully' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // --- ADMIN UNIT MANAGEMENT (CREATE, EDIT, DELETE) ---
+  expressApp.get('/api/admin/units', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const units = await Unit.find().populate('Property');
+      res.json(units);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.post('/api/admin/units', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const newUnit = await Unit.create(req.body);
+      res.status(201).json(newUnit);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.put('/api/admin/units/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const updated = await Unit.findByIdAndUpdate(req.params.id, req.body, { new: true });
+      if (!updated) return res.status(404).json({ error: 'Unit not found' });
+      res.json(updated);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.delete('/api/admin/units/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const deleted = await Unit.findByIdAndDelete(req.params.id);
+      if (!deleted) return res.status(404).json({ error: 'Unit not found' });
+      res.json({ message: 'Unit deleted successfully' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // --- ADMIN LEASE MANAGEMENT (CREATE, EDIT, DELETE) ---
+  expressApp.get('/api/admin/leases', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const leases = await Lease.find().populate('tenantId Unit');
+      res.json(leases);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.post('/api/admin/leases', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const newLease = await Lease.create(req.body);
+      res.status(201).json(newLease);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.put('/api/admin/leases/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const updated = await Lease.findByIdAndUpdate(req.params.id, req.body, { new: true });
+      if (!updated) return res.status(404).json({ error: 'Lease not found' });
+      res.json(updated);
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  expressApp.delete('/api/admin/leases/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const deleted = await Lease.findByIdAndDelete(req.params.id);
+      if (!deleted) return res.status(404).json({ error: 'Lease not found' });
+      res.json({ message: 'Lease deleted successfully' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
+  // --- EXISTING STATUS & USER MODS ---
   expressApp.put('/api/admin/properties/:id/status', authenticateToken, requireAdmin, async (req, res) => {
     try {
       const property = await Property.findById(req.params.id);
@@ -371,6 +527,14 @@ nextApp.prepare().then(async () => {
     } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
+  expressApp.delete('/api/admin/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+    try {
+      const deleted = await User.findByIdAndDelete(req.params.id);
+      if (!deleted) return res.status(404).json({ error: 'User not found' });
+      res.json({ message: 'User deleted successfully' });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+  });
+
   expressApp.get('/api/admin/logs', authenticateToken, requireAdmin, async (req, res) => {
     try {
       const logs = await AdminLog.find()
@@ -396,7 +560,7 @@ nextApp.prepare().then(async () => {
     console.log(`\n=============================================================`);
     console.log(`🏢 Real Estate & Property Management Engine Is Live`);
     console.log(`📡 Serving API Requests & WebSockets at http://${hostname}:${port}`);
-    console.log(`=============================================================\n`);
+    console.log(`============================================================-\n`);
   });
 
 }).catch((fatalInitCrashErr) => {
