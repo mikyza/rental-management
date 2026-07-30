@@ -291,7 +291,7 @@ export default function PropertyManagementApp() {
       setMarketplaceProperties(data || []);
     } catch (e: any) {
       console.error(e.message);
-    } font: null; finally {
+    } finally {
       setLoadingMarketplace(false);
     }
   };
@@ -701,7 +701,7 @@ export default function PropertyManagementApp() {
             <div className="bg-gradient-to-br from-slate-900 via-slate-800 to-emerald-950 rounded-3xl p-6 sm:p-10 text-white shadow-xl relative overflow-hidden">
               <div className="max-w-2xl space-y-3">
                 <span className="inline-block px-3 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-xs font-bold rounded-full uppercase tracking-wider">
-                  Verified Kenya Real Estate
+                  Verified Real Estate
                 </span>
                 <h1 className="text-2xl sm:text-4xl font-black tracking-tight leading-snug">
                   Modern Rentals, Built For Mobile.
